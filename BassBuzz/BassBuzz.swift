@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreHaptics
+import AVFoundation
 
 @main
 struct BassBuzzApp: App {
@@ -72,6 +73,70 @@ final class BassClient: ObservableObject {
             parameterID: .hapticIntensityControl, value: v, relativeTime: 0)], atTime: CHHapticTimeImmediate)
     }
 
+    // MARK: - Phone mic mode (listens to music playing on this iPhone)
+    private let audio = AVAudioEngine()
+    private var lp1: Float = 0, lp2: Float = 0
+    private var avg: Float = 0, peak: Float = 1e-4, cool = 0, tickN = 0, sr: Float = 48000
+
+    func startMic() {
+        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] ok in
+            guard let self else { return }
+            guard ok else { DispatchQueue.main.async { self.status = "Microphone access denied" }; return }
+            do {
+                let s = AVAudioSession.sharedInstance()
+                try s.setCategory(.playAndRecord, mode: .measurement,
+                                  options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP])
+                try s.setPreferredIOBufferDuration(0.005)
+                try s.setActive(true)
+                let input = self.audio.inputNode
+                let fmt = input.outputFormat(forBus: 0)
+                self.sr = Float(fmt.sampleRate)
+                let a = 1 - exp(-2 * Float.pi * Float(self.d.double(forKey: "high")) / self.sr)
+                input.removeTap(onBus: 0)
+                input.installTap(onBus: 0, bufferSize: 512, format: fmt) { [weak self] buf, _ in
+                    self?.process(buf, a)
+                }
+                try self.audio.start()
+                try? self.rumble?.start(atTime: CHHapticTimeImmediate)
+                DispatchQueue.main.async { self.status = "Listening via microphone..." }
+            } catch {
+                DispatchQueue.main.async { self.status = "Mic error: \(error.localizedDescription)" }
+            }
+        }
+    }
+
+    func stopMic() {
+        audio.inputNode.removeTap(onBus: 0)
+        audio.stop()
+        try? rumble?.stop(atTime: CHHapticTimeImmediate)
+        status = "Not connected"
+    }
+
+    private func process(_ buf: AVAudioPCMBuffer, _ a: Float) {
+        guard let ch = buf.floatChannelData?[0], buf.frameLength > 0 else { return }
+        let n = Int(buf.frameLength)
+        var sum: Float = 0
+        for i in 0..<n {                       // two-pole low-pass = bass only
+            lp1 += a * (ch[i] - lp1)
+            lp2 += a * (lp1 - lp2)
+            sum += lp2 * lp2
+        }
+        let e = (sum / Float(n)).squareRoot()
+        peak = max(peak * 0.9995, e)
+        avg += 0.05 * (e - avg)
+        if cool > 0 { cool -= 1 }
+        tickN += 1
+        if tickN % 2 == 0 {
+            let r = min(1, e / peak)
+            setRumble(Double(r * r))
+            DispatchQueue.main.async { self.level = Double(r) }
+        }
+        if cool == 0, e > 0.0003, e > avg * Float(d.double(forKey: "sens")) {
+            pulse(Double(min(1, max(0.35, powf(e / peak, 0.7)))))
+            cool = max(1, Int(0.09 * sr / Float(n)))
+        }
+    }
+
     func sendConfig() {
         let cfg: [String: Double] = ["sens": d.double(forKey: "sens"), "low": 20, "high": d.double(forKey: "high")]
         guard let data = try? JSONSerialization.data(withJSONObject: ["cfg": cfg]),
@@ -127,6 +192,7 @@ final class BassClient: ObservableObject {
 
 struct ContentView: View {
     @AppStorage("host") private var host = "192.168.88.16:8080"
+    @AppStorage("mode") private var mode = 0
     @AppStorage("gain") private var gain = 1.0
     @AppStorage("sharp") private var sharp = 0.2
     @AppStorage("len") private var len = 0.07
@@ -140,12 +206,20 @@ struct ContentView: View {
     var body: some View {
         Form {
             Section {
-                TextField("PC address", text: $host)
-                    .keyboardType(.URL).autocapitalization(.none).disableAutocorrection(true)
+                Picker("Source", selection: $mode) {
+                    Text("PC audio").tag(0)
+                    Text("This phone (mic)").tag(1)
+                }
+                .pickerStyle(.segmented).disabled(on)
+                if mode == 0 {
+                    TextField("PC address", text: $host)
+                        .keyboardType(.URL).autocapitalization(.none).disableAutocorrection(true)
+                }
                 Button(on ? "Stop" : "Start") {
                     on.toggle()
-                    UIApplication.shared.isIdleTimerDisabled = on
-                    on ? client.connect(host) : client.disconnect()
+                    UIApplication.shared.isIdleTimerDisabled = on && mode == 0
+                    if on { if mode == 0 { client.connect(host) } else { client.startMic() } }
+                    else { if mode == 0 { client.disconnect() } else { client.stopMic() } }
                 }
                 .foregroundColor(on ? .red : .purple)
                 ProgressView(value: client.level).tint(.green)
