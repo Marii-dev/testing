@@ -15,6 +15,7 @@ final class BassClient: ObservableObject {
     private var rumble: CHHapticAdvancedPatternPlayer?       // continuous bass-following rumble
     private var task: URLSessionWebSocketTask?
     private var wantConnected = false
+    private var running = false
     private let d = UserDefaults.standard
 
     init() {
@@ -30,10 +31,16 @@ final class BassClient: ObservableObject {
         do {
             engine = try CHHapticEngine()
             engine?.isAutoShutdownEnabled = false
+            engine?.playsHapticsOnly = true   // no audio, so the mic session can't interrupt it
             engine?.resetHandler = { [weak self] in try? self?.engine?.start(); self?.rebuild() }
             engine?.stoppedHandler = { [weak self] r in
-                DispatchQueue.main.async { self?.status = "Haptic engine stopped (reason \(r.rawValue))" }
-                try? self?.engine?.start()
+                DispatchQueue.main.async { self?.status = "Haptic engine stopped (reason \(r.rawValue)), restarting..." }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    guard let self else { return }
+                    try? self.engine?.start()
+                    self.rebuild()                       // players must be rebuilt after a stop
+                    if self.running { try? self.rumble?.start(atTime: CHHapticTimeImmediate) }
+                }
             }
             try engine?.start()
             rebuild()
@@ -92,6 +99,9 @@ final class BassClient: ObservableObject {
                 try s.setAllowHapticsAndSystemSoundsDuringRecording(true)   // iOS mutes haptics while recording otherwise
                 try s.setPreferredIOBufferDuration(0.005)
                 try s.setActive(true)
+                self.engine?.stop(completionHandler: nil)
+                try self.engine?.start()
+                self.rebuild()
                 let input = self.audio.inputNode
                 let fmt = input.outputFormat(forBus: 0)
                 self.sr = Float(fmt.sampleRate)
@@ -101,6 +111,7 @@ final class BassClient: ObservableObject {
                     self?.process(buf, a)
                 }
                 try self.audio.start()
+                self.running = true
                 try? self.rumble?.start(atTime: CHHapticTimeImmediate)
                 DispatchQueue.main.async { self.status = "Listening via microphone..." }
             } catch {
@@ -112,6 +123,7 @@ final class BassClient: ObservableObject {
     func stopMic() {
         audio.inputNode.removeTap(onBus: 0)
         audio.stop()
+        running = false
         try? rumble?.stop(atTime: CHHapticTimeImmediate)
         status = "Not connected"
     }
@@ -157,6 +169,7 @@ final class BassClient: ObservableObject {
         t.resume()
         status = "Listening for beats..."
         sendConfig()
+        running = true
         try? rumble?.start(atTime: CHHapticTimeImmediate)
         setRumble(0)
         listen(t, host)
@@ -166,6 +179,7 @@ final class BassClient: ObservableObject {
         wantConnected = false
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
+        running = false
         try? rumble?.stop(atTime: CHHapticTimeImmediate)
         status = "Not connected"
     }
