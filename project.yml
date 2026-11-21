@@ -18,4 +18,6 @@ targets:
         UILaunchScreen: {}
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        UIBackgroundModes: [audio]
+        NSMicrophoneUsageDescription: Listens to music playing on this phone to create bass haptics.
         NSLocalNetworkUsageDescription: Connects to your PC to receive bass beats.
