@@ -13,6 +13,8 @@ final class BassClient: ObservableObject {
     private var engine: CHHapticEngine?
     private var bank: [CHHapticAdvancedPatternPlayer] = []   // pre-built beat players (low latency)
     private var rumble: CHHapticAdvancedPatternPlayer?       // continuous bass-following rumble
+    private var tapBank: [CHHapticAdvancedPatternPlayer] = []  // ASMR taps/clicks
+    private var slide: CHHapticAdvancedPatternPlayer?          // ASMR slide/scrape texture
     private var task: URLSessionWebSocketTask?
     private var wantConnected = false
     private var running = false
@@ -20,7 +22,8 @@ final class BassClient: ObservableObject {
 
     init() {
         d.register(defaults: ["gain": 1.0, "sharp": 0.2, "len": 0.07, "sens": 1.35,
-                              "high": 150.0, "rumbleOn": true, "rumbleAmt": 0.5])
+                              "high": 150.0, "rumbleOn": true, "rumbleAmt": 0.5,
+                              "fx": 0, "asens": 1.6, "asmrAmt": 0.7])
         setupEngine()
     }
 
@@ -39,7 +42,7 @@ final class BassClient: ObservableObject {
                     guard let self else { return }
                     try? self.engine?.start()
                     self.rebuild()                       // players must be rebuilt after a stop
-                    if self.running { try? self.rumble?.start(atTime: CHHapticTimeImmediate) }
+                    if self.running { self.startLoops() }
                 }
             }
             try engine?.start()
@@ -67,6 +70,18 @@ final class BassClient: ObservableObject {
             relativeTime: 0, duration: 30)
         rumble = try? engine.makeAdvancedPlayer(with: CHHapticPattern(events: [r], parameters: []))
         rumble?.loopEnabled = true
+        tapBank = (1...4).compactMap { n in
+            let ev = CHHapticEvent(eventType: .hapticTransient, parameters: [
+                CHHapticEventParameter(parameterID: .hapticIntensity, value: Float(n) / 4),
+                CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.9)], relativeTime: 0)
+            return try? engine.makeAdvancedPlayer(with: CHHapticPattern(events: [ev], parameters: []))
+        }
+        let sl = CHHapticEvent(eventType: .hapticContinuous, parameters: [
+            CHHapticEventParameter(parameterID: .hapticIntensity, value: 1),
+            CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.7)],
+            relativeTime: 0, duration: 30)
+        slide = try? engine.makeAdvancedPlayer(with: CHHapticPattern(events: [sl], parameters: []))
+        slide?.loopEnabled = true
     }
 
     private func pulse(_ level: Double) {
@@ -112,7 +127,7 @@ final class BassClient: ObservableObject {
                 }
                 try self.audio.start()
                 self.running = true
-                try? self.rumble?.start(atTime: CHHapticTimeImmediate)
+                self.startLoops()
                 DispatchQueue.main.async { self.status = "Listening via microphone..." }
             } catch {
                 DispatchQueue.main.async { self.status = "Mic error: \(error.localizedDescription)" }
@@ -124,7 +139,7 @@ final class BassClient: ObservableObject {
         audio.inputNode.removeTap(onBus: 0)
         audio.stop()
         running = false
-        try? rumble?.stop(atTime: CHHapticTimeImmediate)
+        stopLoops()
         status = "Not connected"
     }
 
@@ -153,8 +168,35 @@ final class BassClient: ObservableObject {
         }
     }
 
+    private func tap(_ level: Double) {
+        guard !tapBank.isEmpty else { return }
+        let i = min(1, level * d.double(forKey: "asmrAmt"))
+        let p = tapBank[min(tapBank.count - 1, max(0, Int((i * 4).rounded(.up)) - 1))]
+        try? p.stop(atTime: CHHapticTimeImmediate)
+        try? p.start(atTime: CHHapticTimeImmediate)
+    }
+
+    private func setSlide(_ e: Double) {
+        let v = Float(min(1, e * d.double(forKey: "asmrAmt") * 0.5))
+        try? slide?.sendParameters([CHHapticDynamicParameter(
+            parameterID: .hapticIntensityControl, value: v, relativeTime: 0)], atTime: CHHapticTimeImmediate)
+    }
+
+    private func startLoops() {
+        try? rumble?.start(atTime: CHHapticTimeImmediate)
+        try? slide?.start(atTime: CHHapticTimeImmediate)
+        setRumble(0); setSlide(0)
+    }
+
+    private func stopLoops() {
+        try? rumble?.stop(atTime: CHHapticTimeImmediate)
+        try? slide?.stop(atTime: CHHapticTimeImmediate)
+    }
+
     func sendConfig() {
-        let cfg: [String: Double] = ["sens": d.double(forKey: "sens"), "low": 20, "high": d.double(forKey: "high")]
+        setRumble(0); setSlide(0)   // clear anything stuck when the effect changes
+        let cfg: [String: Double] = ["sens": d.double(forKey: "sens"), "low": 20, "high": d.double(forKey: "high"),
+                                     "mode": d.double(forKey: "fx"), "asens": d.double(forKey: "asens")]
         guard let data = try? JSONSerialization.data(withJSONObject: ["cfg": cfg]),
               let s = String(data: data, encoding: .utf8) else { return }
         task?.send(.string(s)) { _ in }
@@ -170,8 +212,7 @@ final class BassClient: ObservableObject {
         status = "Listening for beats..."
         sendConfig()
         running = true
-        try? rumble?.start(atTime: CHHapticTimeImmediate)
-        setRumble(0)
+        startLoops()
         listen(t, host)
     }
 
@@ -180,7 +221,7 @@ final class BassClient: ObservableObject {
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         running = false
-        try? rumble?.stop(atTime: CHHapticTimeImmediate)
+        stopLoops()
         status = "Not connected"
     }
 
@@ -192,6 +233,11 @@ final class BassClient: ObservableObject {
                 if case .string(let s) = msg, let data = s.data(using: .utf8),
                    let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     if let lv = obj["level"] as? Double { self.pulse(lv) }
+                    if let t = obj["t"] as? Double { self.tap(t) }
+                    if let sv = obj["s"] as? Double {
+                        self.setSlide(sv)
+                        DispatchQueue.main.async { self.level = sv }
+                    }
                     if let e = obj["e"] as? Double {
                         self.setRumble(e)
                         DispatchQueue.main.async { self.level = e }
@@ -211,6 +257,9 @@ final class BassClient: ObservableObject {
 struct ContentView: View {
     @AppStorage("host") private var host = "192.168.88.16:8080"
     @AppStorage("mode") private var mode = 0
+    @AppStorage("fx") private var fx = 0
+    @AppStorage("asens") private var asens = 1.6
+    @AppStorage("asmrAmt") private var asmrAmt = 0.7
     @AppStorage("gain") private var gain = 1.0
     @AppStorage("sharp") private var sharp = 0.2
     @AppStorage("len") private var len = 0.07
@@ -243,6 +292,16 @@ struct ContentView: View {
                 ProgressView(value: client.level).tint(.green)
                 Text(client.status).foregroundColor(.secondary)
             }
+            Section("Effect (PC mode)") {
+                Picker("Effect", selection: $fx) {
+                    Text("Bass").tag(0)
+                    Text("ASMR").tag(1)
+                    Text("Both").tag(2)
+                }
+                .pickerStyle(.segmented)
+                slider("ASMR sensitivity (lower = more taps)", $asens, 1.1...3.0, "%.2f")
+                slider("ASMR strength", $asmrAmt, 0.2...1.5, "%.2fx")
+            }
             Section("Beat hits") {
                 slider("Strength", $gain, 0.3...2.0, "%.2fx")
                 slider("Sharpness (soft ↔ crisp)", $sharp, 0...1, "%.2f")
@@ -261,6 +320,8 @@ struct ContentView: View {
         .onChange(of: len) { _ in client.rebuild() }
         .onChange(of: sens) { _ in client.sendConfig() }
         .onChange(of: high) { _ in client.sendConfig() }
+        .onChange(of: fx) { _ in client.sendConfig() }
+        .onChange(of: asens) { _ in client.sendConfig() }
     }
 
     private func slider(_ title: String, _ v: Binding<Double>, _ r: ClosedRange<Double>, _ f: String) -> some View {
