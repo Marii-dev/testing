@@ -31,7 +31,10 @@ final class BassClient: ObservableObject {
             engine = try CHHapticEngine()
             engine?.isAutoShutdownEnabled = false
             engine?.resetHandler = { [weak self] in try? self?.engine?.start(); self?.rebuild() }
-            engine?.stoppedHandler = { [weak self] _ in try? self?.engine?.start() }
+            engine?.stoppedHandler = { [weak self] r in
+                DispatchQueue.main.async { self?.status = "Haptic engine stopped (reason \(r.rawValue))" }
+                try? self?.engine?.start()
+            }
             try engine?.start()
             rebuild()
         } catch { status = "Haptic error: \(error.localizedDescription)" }
@@ -86,6 +89,7 @@ final class BassClient: ObservableObject {
                 let s = AVAudioSession.sharedInstance()
                 try s.setCategory(.playAndRecord, mode: .measurement,
                                   options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP])
+                try s.setAllowHapticsAndSystemSoundsDuringRecording(true)   // iOS mutes haptics while recording otherwise
                 try s.setPreferredIOBufferDuration(0.005)
                 try s.setActive(true)
                 let input = self.audio.inputNode
