@@ -1,0 +1,21 @@
+name: BassBuzz
+options:
+  bundleIdPrefix: com.bassbuzz
+targets:
+  BassBuzz:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources: [BassBuzz]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bassbuzz.app
+        TARGETED_DEVICE_FAMILY: "1"
+    info:
+      path: BassBuzz/Info.plist
+      properties:
+        CFBundleDisplayName: Bass Buzz
+        UILaunchScreen: {}
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSLocalNetworkUsageDescription: Connects to your PC to receive bass beats.
